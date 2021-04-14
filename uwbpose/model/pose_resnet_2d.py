@@ -105,14 +105,18 @@ class PoseResNet(nn.Module):
         print("---------------flatten pose net---------------")
         super(PoseResNet, self).__init__()
         # ResNet
-        #print(INPUT_D, self.inplanes)
+        print(INPUT_D, self.inplanes)
         self.conv1 = nn.Sequential(
-            nn.Conv2d(INPUT_D, self.inplanes, kernel_size=3, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(64, momentum=BN_MOMENTUM),
+            #nn.Conv2d(INPUT_D, self.inplanes, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.Conv2d(INPUT_D, self.inplanes, kernel_size=4, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(self.inplanes, momentum=BN_MOMENTUM),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.inplanes, self.inplanes, kernel_size=4, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(self.inplanes, momentum=BN_MOMENTUM),
             nn.ReLU(inplace=True)
         )
         #self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(block, 64, layers[0])  # Bottleneck 3
+        self.layer1 = self._make_layer(block, 64, layers[0], stride=1)  # Bottleneck 3
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2)  # Bottleneck 4
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2)  # Bottleneck 6
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)  # Bottlenect 3
@@ -131,6 +135,9 @@ class PoseResNet(nn.Module):
             stride=1,
             padding=0  # if FINAL_CONV_KERNEL = 3 else 1
         )
+
+        dummy = torch.zeros(64, 1, 126, 126)
+        self.check_dim(dummy)
 
     def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
@@ -157,6 +164,9 @@ class PoseResNet(nn.Module):
             padding = 1
             output_padding = 1
         elif deconv_kernel == 2:
+            padding = 0
+            output_padding = 0
+        elif deconv_kernel == 5:
             padding = 0
             output_padding = 0
 
@@ -191,23 +201,34 @@ class PoseResNet(nn.Module):
 
     def forward(self, x):
         # x = F.interpolate(x, scale_factor=40, mode='bilinear', align_corners=False)
-        #print("raw_x.shape ", x.shape)
         x = self.conv1(x)
-        #print(x.shape)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.deconv_layers(x)
+        x = self.final_layer(x)
+        return x
+
+    def check_dim(self, x):
+        # x = F.interpolate(x, scale_factor=40, mode='bilinear', align_corners=False)
+        print("raw_x.shape ", x.shape)
+        x = self.conv1(x)
+        print("conv1",x.shape)
         #x = self.maxpool(x)
         #print(x.shape)
         x = self.layer1(x)
-        #print(x.shape)
+        print("layer1 ",x.shape)
         x = self.layer2(x)
-        #print(x.shape)
+        print("layer2 ",x.shape)
         x = self.layer3(x)
-        #print(x.shape)
+        print("layer3 ",x.shape)
         x = self.layer4(x)
-        #print(x.shape)
+        print("layer4 ",x.shape)
         x = self.deconv_layers(x)
-        #print(x.shape)
+        print("before_final",x.shape)
         x = self.final_layer(x)
-        #print(x.shape)
+        print(x.shape)
         return x
 
     def init_weights(self, pretrained=''):

@@ -10,10 +10,16 @@ from datetime import datetime
 
 from tqdm import tqdm
 
-from pose_dataset import *
-from pose_resnet import *
-from pose_resnet_2d import *
-from pose_hrnet import *
+from pose_dataset2 import *
+from model.pose_resnet import *
+from model.pose_resnet_2d import *
+from model.pose_hrnet import *
+from model.transpose_h import *
+from model.transpose_r import *
+from model.hr_transformer import *                 
+from model.vit import ViT
+#from model.t2t import T2TViT
+from model.t2t120 import T2TViT
 import arguments
 from make_log import *
 from evaluate import *
@@ -22,16 +28,16 @@ from loss import *
 args = arguments.get_arguments()
 
 # model name
-model_name = '{}_nlayer{}_{}_lr{}_batch{}_momentum{}_schedule{}_nepoch{}_{}'.format(
+model_name = '{}_arch-{}_{}_lr{}_batch{}_nepoch{}_cutoff{}_aug-{}_stack{}'.format(
         args.name,
-        args.nlayer,
-        args.optimizer,
+        args.arch,
+        args.hm_size,
         args.lr,
         args.batch_size,
-        args.momentum,
-        args.schedule,
         args.nepochs,
-        args.arch
+        args.cutoff,
+        args.augment,
+        args.frame_stack_num
     )
 logger = make_logger(log_file=model_name)
 logger.info("saved model name "+model_name)        
@@ -50,11 +56,67 @@ else:
 #----- model -----
 if args.arch =='hrnet':
     model = get_pose_hrnet()
+elif args.arch =='transh':
+    model = get_transpose_h_net()
+elif args.arch =='transr':
+    model = get_transpose_r_net(num_layer=args.nlayer)
+elif args.arch == 'multitrans':
+    model = get_multi_trans_net()
+elif args.arch =='vit':
+    model = ViT(
+            image_size=126,
+            patch_size=18,
+            dim = 2048, #1024,
+            depth = 6,
+            heads = 16,
+            mlp_dim = 980, #256 * 14 # feedforward hidden dim
+            dropout = 0.1,
+            channels = 1,
+            emb_dropout = 0.1
+    )
+    
+    logger.info("vit model hyperparam")
+    logger.info("image size : {image_size}\t patch size : {patch_size}\t dim : {dim}\t depth : {depth}\t heads : {heads}\tmlp_dim : {mlp_dim}\t dropout : {dropout}\t emb_droput : {emb_dropout}\n".format(
+            image_size=126,
+            patch_size=18,
+            dim = 2048, #1024,
+            depth = 6,
+            heads = 16,
+            mlp_dim = 980, #256 * 14 # feedforward hidden dim
+            dropout = 0.1,
+            channels = 1,
+            emb_dropout = 0.1
+    ))
+elif args.arch =='t2t':
+    model = T2TViT(
+        dim = 900,  #
+        image_size = 126,
+        depth = 5,
+        heads = 8,
+        mlp_dim = 512,
+        channels = args.frame_stack_num,
+        t2t_layers = ((7, 4), (3, 2), (3, 2)) # tuples of the kernel size and stride of each consecutive layers of the initial token to token module
+        #t2t_layers = ((9, 5), (3, 2), (3, 2))    # 74 32 32
+                                                # tuples of the kernel size and stride of each consecutive layers of the initial token to token module
+    )
+    logger.info("tkt model hyperparam")
+    logger.info("dim : {dim}\t image size : {image_size}\t depth : {depth}\t heads : {heads}\tmlp_dim : {mlp_dim}\t t2t_layers : {t2t_layers}\n".format(
+        dim = 900,
+        image_size = 126,
+        depth = 5,
+        heads = 8,
+        mlp_dim = 512,
+        channels = args.frame_stack_num,
+        t2t_layers = ((7, 4), (3, 2), (3, 2))
+        #t2t_layers = ((9, 5), (3, 2), (3, 2)) # tuples of the kernel size and stride of each consecutive layers of the initial token to token module
+    ))
+    #print(model)
 else:
     if args.flatten:
         model = get_2d_pose_net(num_layer=args.nlayer, input_depth=1)
     else:
         model = get_pose_net(num_layer=args.nlayer, input_depth=2048-args.cutoff)
+
 
 if multi_gpu is True:
     model = torch.nn.DataParallel(model).cuda()
@@ -66,6 +128,8 @@ else:
     model = torch.nn.DataParallel(model, device_ids = [set_gpu_num]).cuda()
 #model.cuda() # torch.cuda_set_device(device) 로 send
 #model.to(device) # 직접 device 명시
+
+
 
 #----- loss function -----
 criterion = nn.MSELoss().cuda()
@@ -88,9 +152,16 @@ train_dataloader = DataLoader(train_data, batch_size=args.batch_size, shuffle=Tr
 max_acc = 0
 max_acc_epoch = 0
 
-#name = 'save_model/201011_resnet18_SGD_lr0.001_batch32_momentum0.9_schedule[90, 110]_nepoch140_epoch88.pt'
-#state_dict = torch.load(name)
-#model.module.load_state_dict(state_dict)
+#load_model_name = '210410_arch-t2t_120_lr0.001_batch64_nepoch50_cutoff284_aug-None_stack1_epoch6.pt'
+#load_model_name = '210410_arch-t2t_120_lr0.001_batch64_nepoch50_cutoff284_aug-None_stack1_epoch5.pt'
+load_model_name = 'paper-0412-shdataset_arch-t2t_120_lr0.001_batch32_nepoch20_cutoff284_aug-None_stack1_epoch19.pt'
+print("load model = ", load_model_name)
+model.module.load_state_dict(torch.load('./save_model/'+load_model_name))
+
+param = sum(p.numel() for p in model.parameters() if p.requires_grad)
+logger.info("Initialized model with {} parameters".format(param))
+
+
 begin_time = datetime.now()
 print(begin_time)
 for epoch in range(args.nepochs):
@@ -99,14 +170,13 @@ for epoch in range(args.nepochs):
     avg_acc = 0
     sum_acc = 0
     total_cnt = 0
-
     iterate = 0
-
     for rf, target_heatmap in tqdm(train_dataloader):
         #print(rf.shape, target_heatmap.shape)
         #print(rf.dtype, target_heatmap.dtype)
         rf, target_heatmap = rf.cuda(), target_heatmap.cuda()
-        
+        #print("rf.shape : ", rf.shape)
+        #print("heatamp.shape : ", target_heatmap.shape)
         out = model(rf)
         #loss = 0.5 * criterion(out, target_heatmap)
         loss = cr(out, target_heatmap)

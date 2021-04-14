@@ -5,10 +5,14 @@ from tqdm import tqdm
 import sys
 
 import arguments
-from pose_dataset import *
-from pose_resnet_2d import *
-from pose_resnet import *
-from pose_hrnet import *
+from pose_dataset2 import *
+from model.pose_resnet_2d import *
+from model.pose_resnet import *
+from model.pose_hrnet import *
+from model.transpose_h import *
+from model.transpose_r import *
+from model.vit import ViT
+from model.t2t120 import T2TViT
 from loss import *
 from visualize import *
 from inference import *
@@ -22,12 +26,14 @@ def prediction(model, rf, target_heatmap, criterion):
 
     _, temp_avg_acc, cnt, pred = accuracy(out.detach().cpu().numpy(),
             target_heatmap.detach().cpu().numpy())
-
+    
+    #print(out.shape, target_heatmap.shape)
     preds, maxvals = get_final_preds(out.clone().cpu().numpy())
 
     target_label, target_maxvals = get_final_preds(target_heatmap.clone().cpu().numpy())
-
-    temp_true_det, temp_whole_cnt = pck(preds*4, target_label*4)
+    
+    #print(preds.shape, target_label.shape)
+    temp_true_det, temp_whole_cnt = pck(preds*4, target_label*4) # *4
 
     return out, loss, temp_avg_acc, cnt, preds, target_label, temp_true_det, temp_whole_cnt
 
@@ -96,10 +102,14 @@ if __name__ == '__main__':
     args = arguments.get_arguments()
    
     model_name = args.model_name
-    #model_name = "210109_newdata_normalize_nlayer18_adam_lr0.001_batch32_momentum0.9_schedule[10, 20]_nepoch30"
-    #model_name = "210112_mixup_nlayer18_adam_lr0.001_batch32_momentum0.9_schedule[10, 20]_nepoch30"
     #model_name = '210113_intensity_nlayer18_adam_lr0.001_batch32_momentum0.9_schedule[10, 20]_nepoch30'
-    model_name = '210119_hrnet_nlayer18_adam_lr0.001_batch16_momentum0.9_schedule[10, 20]_nepoch30_hrnet'
+    #model_name = '210302_vit_nlayer18_adam_lr0.001_batch64_momentum0.9_schedule[10, 20]_nepoch30_vit'
+    #model_name = '210304_vit_arch_vit_adam_lr0.001_batch64_nepoch284_cutoff30_cutmix'
+    #model_name = '210410_arch-t2t_120_lr0.001_batch64_nepoch30_cutoff284_aug-None_stack1'
+    #model_name = 'paper-210412_arch-resnet_120_lr0.001_batch64_nepoch30_cutoff284_aug-None_stack1'
+    model_name = 'paper-0412-shdataset_arch-t2t_120_lr0.001_batch32_nepoch20_cutoff284_aug-None_stack1'
+    #model_name = 'paper-210412_arch-t2t_120_lr0.001_batch64_nepoch30_cutoff284_aug-mixup_stack1'
+    
     if len(model_name) == 0:
         print("You must enter the model name for testing")
         sys.exit()
@@ -127,6 +137,46 @@ if __name__ == '__main__':
     #----- model -----
     if args.arch =='hrnet':
         model = get_pose_hrnet()
+    elif args.arch =='transh':
+        model = get_transpose_h_net()
+    elif args.arch =='transr':
+        model = get_transpose_r_net(num_layer=args.nlayer)
+    elif args.arch =='vit':
+        model = ViT(
+            image_size=126,
+            patch_size=18,
+            dim = 2048, #1024,
+            depth = 6,
+            heads = 16,
+            mlp_dim = 980, #256 * 14 # feedforward hidden dim
+            dropout = 0.1,
+            channels = 1,
+            emb_dropout = 0.1
+        )
+    elif args.arch =='t2t':
+        model = T2TViT(
+            dim = 900,  #
+            image_size = 126,
+            depth = 5,
+            heads = 8,
+            mlp_dim = 512,
+            channels = args.frame_stack_num,
+            t2t_layers = ((7, 4), (3, 2), (3, 2)) # tuples of the kernel size and stride of each consecutive layers of the initial token to token module
+            #t2t_layers = ((9, 5), (3, 2), (3, 2))    # 74 32 32
+                                                    # tuples of the kernel size and stride of each consecutive layers of the initial token to token module
+        
+        )
+        logger.info("tkt model hyperparam")
+        logger.info("dim : {dim}\t image size : {image_size}\t depth : {depth}\t heads : {heads}\tmlp_dim : {mlp_dim}\t t2t_layers : {t2t_layers}\n".format(
+            dim = 900,
+            image_size = 126,
+            depth = 5,
+            heads = 8,
+            mlp_dim = 512,
+            channels = args.frame_stack_num,
+            t2t_layers = ((7, 4), (3, 2), (3, 2))
+            #t2t_layers = ((9, 5), (3, 2), (3, 2)) # tuples of the kernel size and stride of each consecutive layers of the initial token to token module
+        ))
     else:
         if args.flatten:
             model = get_2d_pose_net(num_layer=args.nlayer, input_depth=1)
@@ -137,9 +187,11 @@ if __name__ == '__main__':
         model = torch.nn.DataParallel(model).cuda()
         logger.info("Let's use multi gpu\t# of gpu : {}".format(torch.cuda.device_count()))
     else:
-        torch.cuda.set_device(set_gpu_num)
+        device = torch.device(f'cuda:{set_gpu_num}' if torch.cuda.is_available() else 'cpu')
+        torch.cuda.set_device(device)
         logger.info("Let's use single gpu\t now gpu : {}".format(set_gpu_num))
-        #model.cuda()
+        model.cuda()
+        #model.to(device)
         model = torch.nn.DataParallel(model, device_ids = [set_gpu_num]).cuda()
 
     #model.cuda() # torch.cuda_set_device(device) 로 send
@@ -156,8 +208,9 @@ if __name__ == '__main__':
 
     model_name = model_name + '_epoch{}.pt'
     # 원하는 모델 구간 지정해야함.
-    #for i in range(20, 30):
-    for i in range(5, 10):
+    for i in [18,19]:
+    #for i in range(25, 30):
+    #for i in range(5, 10):
         logger.info("epoch %d"%i)
         logger.info('./save_model/' + model_name.format(i))
         model.module.load_state_dict(torch.load('./save_model/'+model_name.format(i)))

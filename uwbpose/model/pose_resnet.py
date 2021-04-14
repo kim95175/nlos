@@ -192,7 +192,7 @@ class PoseResNet(nn.Module):
         #print("raw_x.shape ", x.shape)
         x = self.conv1(x)
         #print(x.shape)
-        #x = self.maxpool(x)
+        x = self.maxpool(x)
         x = self.layer1(x)
         #print(x.shape)
         x = self.layer2(x)

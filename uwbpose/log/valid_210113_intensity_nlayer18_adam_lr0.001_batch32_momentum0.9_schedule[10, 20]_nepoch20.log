@@ -1,9 +1,0 @@
-2021-01-14 22:25:04,388 - Pose - INFO - saved valid log file valid_210113_intensity_nlayer18_adam_lr0.001_batch32_momentum0.9_schedule[10, 20]_nepoch20
-2021-01-14 22:25:04,388 - Pose - INFO - training batch size : 32	number of layer : 18
-2021-01-14 22:25:04,388 - Pose - INFO - optimizer : adam	learning rate : 0.001	momentum : 0.9
-2021-01-14 22:25:04,388 - Pose - INFO - number of epochs : 140	scheduler : [10, 20]	gammas : 0.1
-2021-01-14 22:25:04,388 - Pose - INFO - gaussian noise : False	normalize : False	cutoff : 128	visualize : False
-2021-01-14 22:25:04,388 - Pose - INFO - data augmentation : None	flatten : True
-2021-01-14 22:25:04,536 - Pose - INFO - Let's use single gpu	 now gpu : 1
-2021-01-14 22:25:33,680 - Pose - INFO - epoch 15
-2021-01-14 22:25:33,680 - Pose - INFO - ./save_model/210113_intensity_nlayer18_adam_lr0.001_batch32_momentum0.9_schedule[10, 20]_nepoch20_epoch15.pt
