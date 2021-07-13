@@ -6,12 +6,18 @@ import sys
 
 import arguments
 from pose_dataset2 import *
-from model.pose_resnet_2d import *
-from model.pose_resnet import *
+#from pose_dataset3 import *
+#from model.pose_resnet_4d import *
+#from model.pose_resnet_2d import *
+#from model.pose_resnet_1d import *
+from model.mask_resnet_2d import *
+from model.pose_resnet_one import *
 from model.pose_hrnet import *
 from model.transpose_h import *
 from model.transpose_r import *
 from model.vit import ViT
+#from model.t2t_one import T2TViT_One
+from model.t2t_one_new import T2TViT_One
 from model.t2t120 import T2TViT
 from loss import *
 from visualize import *
@@ -19,8 +25,22 @@ from inference import *
 from make_log import *
 from evaluate import *
 
-def prediction(model, rf, target_heatmap, criterion):
-    out = model(rf)
+
+
+def prediction(model, rf, target_heatmap, criterion, debug_mask=True):
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+
+    #start.record()
+    if debug_mask:
+        out, mask = model(rf)
+    else:
+        out = model(rf)
+
+    #end.record()
+
+    #torch.cuda.synchronize()
+    #print(start.elapsed_time(end))
 
     loss = criterion(out, target_heatmap)
 
@@ -35,9 +55,12 @@ def prediction(model, rf, target_heatmap, criterion):
     #print(preds.shape, target_label.shape)
     temp_true_det, temp_whole_cnt = pck(preds*4, target_label*4) # *4
 
-    return out, loss, temp_avg_acc, cnt, preds, target_label, temp_true_det, temp_whole_cnt
+    if debug_mask:
+        return out, mask, loss, temp_avg_acc, cnt, preds, target_label, temp_true_det, temp_whole_cnt
+    else:
+        return out, loss, temp_avg_acc, cnt, preds, target_label, temp_true_det, temp_whole_cnt
 
-def validate(dataloader, model, logger, criterion, debug_img=False):
+def validate(dataloader, model, logger, criterion, debug_img=False, debug_mask=False):
     model.eval()
     criterion = JointsMSELoss().cuda()
     vis = Visualize(show_debug_idx=False) 
@@ -52,7 +75,29 @@ def validate(dataloader, model, logger, criterion, debug_img=False):
         true_detect = np.zeros((4, 13))
         whole_count = np.zeros((4, 13))
         
-        if debug_img == True:
+        if debug_mask == True:
+            for rf, target_heatmap, img, mask in tqdm(dataloader):
+                rf, target_heatmap, img, mask = rf.cuda(), target_heatmap.cuda(), img.cuda(), mask.cuda()
+                out, mask, loss, temp_avg_acc, cnt, preds, target_label, temp_true_det, temp_whole_cnt = prediction(model, rf, target_heatmap, criterion, debug_mask=True)
+                
+                epoch_loss.append(loss)
+                sum_acc += temp_avg_acc * cnt
+                total_cnt += cnt
+                avg_acc = sum_acc / total_cnt if total_cnt != 0 else 0
+                true_detect += temp_true_det
+                whole_count += temp_whole_cnt
+
+                #save_debug_images(img, target_label*4, target_heatmap, preds*4, out, './vis/batch_{}'.format(iterate))
+                #vis.detect_and_draw_person(img.clone().cpu().numpy(), preds*4, iterate, 'pred')
+                #vis.detect_and_draw_person(img.clone().cpu().numpy(), target_label*4, iterate, 'gt')
+                print_masks(img.clone(), mask, iterate)
+                #vis.compare_visualize(img.clone().cpu().numpy(), preds*4, target_label*4, iterate)
+                
+                #if iterate % 100 == 0:
+                #    logger.info("iteration[%d] batch loss %.6f\tavg_acc %.4f\ttotal_count %d"%(iterate, loss.item(), avg_acc, total_cnt))
+                iterate += 1
+
+        elif debug_img == True:
             for rf, target_heatmap, img in tqdm(dataloader):
                 rf, target_heatmap, img = rf.cuda(), target_heatmap.cuda(), img.cuda()
                 out, loss, temp_avg_acc, cnt, preds, target_label, temp_true_det, temp_whole_cnt = prediction(model, rf, target_heatmap, criterion)
@@ -102,14 +147,12 @@ if __name__ == '__main__':
     args = arguments.get_arguments()
    
     model_name = args.model_name
-    #model_name = '210113_intensity_nlayer18_adam_lr0.001_batch32_momentum0.9_schedule[10, 20]_nepoch30'
-    #model_name = '210302_vit_nlayer18_adam_lr0.001_batch64_momentum0.9_schedule[10, 20]_nepoch30_vit'
-    #model_name = '210304_vit_arch_vit_adam_lr0.001_batch64_nepoch284_cutoff30_cutmix'
-    #model_name = '210410_arch-t2t_120_lr0.001_batch64_nepoch30_cutoff284_aug-None_stack1'
-    #model_name = 'paper-210412_arch-resnet_120_lr0.001_batch64_nepoch30_cutoff284_aug-None_stack1'
-    model_name = 'paper-0412-shdataset_arch-t2t_120_lr0.001_batch32_nepoch20_cutoff284_aug-None_stack1'
-    #model_name = 'paper-210412_arch-t2t_120_lr0.001_batch64_nepoch30_cutoff284_aug-mixup_stack1'
-    
+    #model_name = 'paper-0419_arch-t2t_one_lr0.001_batch64_nepoch30_cutoff448_aug-None_stack1'
+    #model_name = 'paper-0419_arch-resnet_one_lr0.001_batch64_nepoch30_cutoff448_aug-None_stack1'
+    #model_name = 'paper-0506_arch-resnet_lr0.001_batch64_nepoch15_cutoff284_aug-None_stack1'
+    #model_name = 'paper-0506_arch-t2t_lr0.001_batch64_nepoch30_cutoff284_aug-None_stack1'    
+    model_name = '0703_mask_arch-resnet_lr0.001_batch64_nepoch30_cutoff284_aug-None_stack1'
+
     if len(model_name) == 0:
         print("You must enter the model name for testing")
         sys.exit()
@@ -143,12 +186,12 @@ if __name__ == '__main__':
         model = get_transpose_r_net(num_layer=args.nlayer)
     elif args.arch =='vit':
         model = ViT(
-            image_size=126,
-            patch_size=18,
-            dim = 2048, #1024,
+            image_size=40, #126,
+            patch_size=8, #18,
+            dim = 1024, #1024,
             depth = 6,
             heads = 16,
-            mlp_dim = 980, #256 * 14 # feedforward hidden dim
+            mlp_dim = 512,  #980, #256 * 14 # feedforward hidden dim
             dropout = 0.1,
             channels = 1,
             emb_dropout = 0.1
@@ -160,7 +203,7 @@ if __name__ == '__main__':
             depth = 5,
             heads = 8,
             mlp_dim = 512,
-            channels = args.frame_stack_num,
+            channels = 1, #args.frame_stack_num,
             t2t_layers = ((7, 4), (3, 2), (3, 2)) # tuples of the kernel size and stride of each consecutive layers of the initial token to token module
             #t2t_layers = ((9, 5), (3, 2), (3, 2))    # 74 32 32
                                                     # tuples of the kernel size and stride of each consecutive layers of the initial token to token module
@@ -173,15 +216,40 @@ if __name__ == '__main__':
             depth = 5,
             heads = 8,
             mlp_dim = 512,
-            channels = args.frame_stack_num,
+            channels = 1, #args.frame_stack_num,
             t2t_layers = ((7, 4), (3, 2), (3, 2))
             #t2t_layers = ((9, 5), (3, 2), (3, 2)) # tuples of the kernel size and stride of each consecutive layers of the initial token to token module
         ))
+    elif args.arch =='t2t_one':
+        model = T2TViT_One(
+            dim = 900,  #
+            image_size = 40,
+            depth = 5,
+            heads = 8,
+            mlp_dim = 512,
+            channels =1, # 1, #args.frame_stack_num,
+            #t2t_layers = ((7, 4), (3, 2), (3, 2)) # tuples of the kernel size and stride of each consecutive layers of the initial token to token module
+            t2t_layers = ((7, 4), (3, 2), (1, 1))    # 74 32 32
+                                                    # tuples of the kernel size and stride of each consecutive layers of the initial token to token module
+        )
+        logger.info("tkt model hyperparam")
+        logger.info("dim : {dim}\t image size : {image_size}\t depth : {depth}\t heads : {heads}\tmlp_dim : {mlp_dim}\t t2t_layers : {t2t_layers}\n".format(
+            dim = 900,
+            image_size = 40,
+            depth = 5,
+            heads = 8,
+            mlp_dim = 512,
+            channels = 1, #9, #1, #args.frame_stack_num,
+            #t2t_layers = ((7, 4), (3, 2), (3, 2))
+            t2t_layers = ((7,4), (3, 2), (1, 1))
+            #t2t_layers = ((9, 5), (3, 2), (3, 2)) # tuples of the kernel size and stride of each consecutive layers of the initial token to token module
+        ))
+    elif args.arch == 'resnet_one':
+        model = get_one_pose_net(num_layer=args.nlayer, input_depth=1) 
+    elif args.arch == 'mask_resnet':
+        model =get_2d_mask_net(num_layer=args.nlayer, input_depth=1)
     else:
-        if args.flatten:
-            model = get_2d_pose_net(num_layer=args.nlayer, input_depth=1)
-        else:
-            model = get_pose_net(num_layer=args.nlayer, input_depth=2048 - args.cutoff)
+        model = get_4d_pose_net(num_layer=args.nlayer, input_depth=1)
 
     if multi_gpu is True:
         model = torch.nn.DataParallel(model).cuda()
@@ -207,14 +275,17 @@ if __name__ == '__main__':
     dataloader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
 
     model_name = model_name + '_epoch{}.pt'
+    #model_name = model_name + '_best.pt'
     # 원하는 모델 구간 지정해야함.
-    for i in [18,19]:
-    #for i in range(25, 30):
+    #for i in [30]:
+    #for i in range(18, 20):
+    for i in [27, 28, 29]:
+    #for i in [0]:
     #for i in range(5, 10):
         logger.info("epoch %d"%i)
         logger.info('./save_model/' + model_name.format(i))
         model.module.load_state_dict(torch.load('./save_model/'+model_name.format(i)))
+        #model.module.load_state_dict(torch.load('./save_model/'+model_name))
 
-        #model.module.load_state_dict(torch.load(model_name.format(i)))
         #model.module.load_state_dict(torch.load(model_name))
-        validate(dataloader, model, logger, criterion, debug_img=args.vis)
+        validate(dataloader, model, logger, criterion, debug_img=args.vis, debug_mask=args.mask)

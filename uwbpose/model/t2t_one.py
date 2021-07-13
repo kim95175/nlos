@@ -5,6 +5,8 @@ from torch import nn, einsum
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 
+BN_MOMENTUM = 0.1
+
 class Residual(nn.Module):
     def __init__(self, fn):
         super().__init__()
@@ -101,16 +103,19 @@ class RearrangeImage(nn.Module):
 
 # main class
 
-class T2TViT(nn.Module):
+class T2TViT_One(nn.Module):
     def __init__(self, *, image_size, dim, depth = None, heads = None, mlp_dim = None, pool = 'cls', channels = 1, dim_head = 64, dropout = 0., emb_dropout = 0., transformer = None, t2t_layers = ((7, 4), (3, 2), (3, 2))):
         super().__init__()
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
-        print("-------------- T2TVit Model --------------")
+        print("-------------- T2TVit RF Transformer Model(1x1) --------------")
         layers = []
         layer_dim = channels
         output_image_size = image_size
-        self.sqare_img = False
-        
+        self.deconv_with_bias = False
+
+        self.t2t_module = []
+        #t2t_layers = ((7, 4), (3, 2), (1, 1))
+        print(t2t_layers)
         for i, (kernel_size, stride) in enumerate(t2t_layers):
             if i == 0:
                 layer_dim *= kernel_size ** 2
@@ -122,6 +127,8 @@ class T2TViT(nn.Module):
                     Rearrange('b c n -> b n c'),
                     Transformer(dim = layer_dim, heads = 1, depth = 1, dim_head = layer_dim, mlp_dim = layer_dim, dropout = dropout),
                 ])
+                #self.t2t_module.append(nn.Sequential(*layers))
+                #layers = []
             else:
                 layer_dim *= kernel_size ** 2
                 output_image_size = conv_output_size(output_image_size, kernel_size, stride, stride // 2)
@@ -131,15 +138,17 @@ class T2TViT(nn.Module):
                     Rearrange('b c n -> b n c'),
                     Transformer(dim = layer_dim, heads = 1, depth = 1, dim_head = layer_dim, mlp_dim = layer_dim, dropout = dropout),
                 ])
+                #self.t2t_module.append(nn.Sequential(*layers))
+                #layers = [] 
         
-        
-        layers.append(nn.Linear(layer_dim, dim))
+        #layers.append(nn.Linear(layer_dim, dim))
         self.to_patch_embedding = nn.Sequential(*layers)
-        #self.to_latent = nn.Linear(layer_dim, dim)
+        self.linear_projection = nn.Linear(layer_dim, dim)
         print("output_image_sizse", output_image_size)
         self.pos_embedding = nn.Parameter(torch.randn(1, output_image_size ** 2 + 1, dim))
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
-        self.dropout = nn.Dropout(emb_dropout)
+        
+        #self.dropout = nn.Dropout(emb_dropout)
 
         if not exists(transformer):
             assert all([exists(depth), exists(heads), exists(mlp_dim)]), 'depth, heads, and mlp_dim must be supplied'
@@ -147,16 +156,20 @@ class T2TViT(nn.Module):
         else:
             self.transformer = transformer
 
-        self.pool = pool
-        
         self.inplanes = output_image_size ** 2 + 1 #65
-  
+
         self.deconv_layers = self._make_deconv_layer(
             2,                  # NUM_DECONV_LAYERS
             [256, 256],    # NUM_DECONV_FILTERS
             [4, 4],          # NUM_DECONV_KERNERLS
         )
-
+        '''
+        self.deconv_layers = self._make_deconv_layer(
+            4,  # NUM_DECONV_LAYERS
+            [256,256,256,256],  # NUM_DECONV_FILTERS
+            [3,4,4,4],  # NUM_DECONV_KERNERLS
+        )
+        '''
         self.final_layer = nn.Conv2d(
             in_channels=256,
             out_channels=13,  #cfg['MODEL']['NUM_JOINTS'],
@@ -165,35 +178,28 @@ class T2TViT(nn.Module):
             padding=0
         )
 
-        self.mask_layer = nn.Conv2d(
-            in_channels=256,  # NUM_DECONV_FILTERS[-1]
-            out_channels=3,  # NUM_JOINTS,
-            kernel_size=1,  # FINAL_CONV_KERNEL
-            stride=1,
-            padding=0  # if FINAL_CONV_KERNEL = 3 else 1
-        )
-
-        dummy = torch.zeros(64, channels, 126, 126)
+        dummy = torch.zeros(64, channels, 40, 40)
         #dummy = torch.zeros(32, channels, 9, 1809)  
-        self.check_dim(dummy)
+        #self.check_dim(dummy)
+
 
     def forward(self, img):
         x = self.to_patch_embedding(img)
-        #x = self.to_latent(x)
+        x = self.linear_projection(x)
         b, n, _ = x.shape
 
         cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b)
         x = torch.cat((cls_tokens, x), dim=1)
         x += self.pos_embedding
-        x = self.dropout(x)
+        #x = self.dropout(x)
         x = self.transformer(x)
         x = rearrange(x, 'b c (h w) -> b c h w', h = int(math.sqrt(x.shape[2])))
         #x = x.reshape(-1, 65, 30, 30)
         #x = self.to_latent(x)
         x = self.deconv_layers(x) # batch, 256, 64, 64
-        pose = self.final_layer(x)
-        mask = self.mask_layer(x)
-        return pose, mask
+        x = self.final_layer(x)
+        return x
+
     
     def _make_deconv_layer(self, num_layers, num_filters, num_kernels):
         assert num_layers == len(num_filters), \
@@ -234,16 +240,61 @@ class T2TViT(nn.Module):
             output_padding = 0
 
         return deconv_kernel, padding, output_padding
-    
-    def check_dim(self, img):
-        #p = self.test_layers_embed(img)
-        #print("to_patch_embedding[0] : ", p.shape)
+    '''
+    def _get_deconv_cfg(self, deconv_kernel, index):
+        if deconv_kernel == 4:
+            padding = 1
+            output_padding = 0
+        elif deconv_kernel == 3:
+            padding = 0
+            output_padding = 0
+        elif deconv_kernel == 2:
+            padding = 0
+            output_padding = 0
+        elif deconv_kernel == 5:
+            padding = 0
+            output_padding = 0
 
-        print("input : ", img.shape)
-        x = self.to_patch_embedding(img)
+        return deconv_kernel, padding, output_padding
+
+    def _make_deconv_layer(self, num_layers, num_filters, num_kernels):  
+        assert num_layers == len(num_filters), \
+            'ERROR: num_deconv_layers is different len(num_deconv_filters)'
+        assert num_layers == len(num_kernels), \
+            'ERROR: num_deconv_layers is different len(num_deconv_filters)'
+        layers = []
+        s = 2
+        self.inplanes = 512
+        for i in range(num_layers):
+            kernel, padding, output_padding = \
+                self._get_deconv_cfg(num_kernels[i], i)
+            if i==0:
+                s=3
+            else:
+                s=2
+            planes = num_filters[i]
+            layers.append(
+                nn.ConvTranspose2d(
+                    in_channels=self.inplanes,
+                    out_channels=planes,
+                    kernel_size=kernel,
+                    stride=s,
+                    padding=padding,
+                    output_padding=output_padding,
+                    bias=self.deconv_with_bias))
+            layers.append(nn.BatchNorm2d(planes, momentum=BN_MOMENTUM))
+            layers.append(nn.ReLU(inplace=True))
+            self.inplanes = planes
+
+        return nn.Sequential(*layers)
+    
+    def check_dim(self, x):
+
+        print("input : ", x.shape)
+        x = self.to_patch_embedding(x)
         print("to_patch_embedding : ", x.shape)
-        #x = self.to_latent(x)
-        #print("linear : ", x.shape)
+        x = self.linear_projection(x)
+        print("linear : ", x.shape)
         b, n, _ = x.shape
 
         cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b)
@@ -251,22 +302,16 @@ class T2TViT(nn.Module):
         print("cls_token : ", x.shape)
         x += self.pos_embedding
         print("pose_embedding : ", x.shape)
-        x = self.dropout(x)
-        print("drouput : ", x.shape)
+        #x = self.dropout(x)
         x = self.transformer(x)
         print("transformer : ", x.shape)
-
-        #x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
-        #print("mean :", x.shape)
         x = rearrange(x, 'b c (h w) -> b c h w', h = int(math.sqrt(x.shape[2])))
         print("reshape ", x.shape)
-
-        #x = self.to_latent(x)
-        #print("to_latent : ", x.shape)
         x = self.deconv_layers(x) # batch, 256, 64, 64
         print("deconv : ", x.shape)
-        pose = self.final_layer(x)
-        mask = self.mask_layer(x)
-        print("final : ", x.shape)
-        print("mask", mask.shape)
-        return mask
+        x = self.final_layer(x)
+        print("reshape ", x.shape)
+        
+    
+        return x
+    '''

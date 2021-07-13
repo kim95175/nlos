@@ -10,18 +10,12 @@ from datetime import datetime
 
 from tqdm import tqdm
 
-from pose_dataset3 import *
-from model.pose_resnet_one import *
+from pose_dataset2 import *
+#from model.pose_resnet_one import *
 #from model.pose_resnet_1d import *
-#from model.pose_resnet_2d import *
-from model.pose_resnet_4d import *
-from model.pose_hrnet import *
-from model.transpose_h import *
-from model.transpose_r import *
-from model.hr_transformer import *                 
-from model.vit import ViT
+from model.mask_resnet_2d import *              
 #from model.t2t_one import T2TViT_One
-from model.t2t_one_new import T2TViT_One
+#from model.t2t_one_new import T2TViT_One
 from model.t2t120 import T2TViT
 import arguments
 from make_log import *
@@ -144,7 +138,7 @@ elif args.arch == 'resnet_one':
 else:
     #if args.flatten:
     #model = get_2d_pose_net(num_layer=args.nlayer, input_depth=1)
-    model = get_4d_pose_net(num_layer=args.nlayer, input_depth=1)
+    model = get_2d_mask_net(num_layer=args.nlayer, input_depth=1)
     #else:
     #    model = get_pose_net(num_layer=args.nlayer, input_depth=2048-args.cutoff)
 
@@ -194,6 +188,7 @@ logger.info("Initialized model with {} parameters".format(param))
 
 begin_time = datetime.now()
 print(begin_time)
+#exit(-1)
 for epoch in range(args.nepochs):
     logger.info("Epoch {}\tcurrent lr : {} {}".format(epoch, optimizer.param_groups[0]['lr'], lr_scheduler.get_last_lr()))
     epoch_loss = []
@@ -201,15 +196,19 @@ for epoch in range(args.nepochs):
     sum_acc = 0
     total_cnt = 0
     iterate = 0
-    for rf, target_heatmap in tqdm(train_dataloader):
+    for rf, target in tqdm(train_dataloader):
         #print(rf.shape, target_heatmap.shape)
         #print(rf.dtype, target_heatmap.dtype)
-        rf, target_heatmap = rf.cuda(), target_heatmap.cuda()
+        rf, target_heatmap, target_mask = rf.cuda(), target[0].cuda(), target[1].cuda()
         #print("rf.shape : ", rf.shape)
-        #print("heatamp.shape : ", target_heatmap.shape)
-        out = model(rf)
+        #print("heatmap.shape : ", target_heatmap.shape)
+        #print("mask.shape : ", target_mask.shape)
+        
+        out, mask = model(rf)
         #loss = 0.5 * criterion(out, target_heatmap)
-        loss = cr(out, target_heatmap)
+        loss_pose = cr(out, target_heatmap)
+        loss_mask = cr(mask, target_mask)
+        loss = loss_pose + loss_mask
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()

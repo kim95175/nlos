@@ -11,6 +11,9 @@ import cv2
 import einops
 from einops import rearrange, reduce, repeat
 from collections import deque
+import math
+
+from visualize import print_masks
 
 
 
@@ -26,6 +29,7 @@ class PoseDataset(Dataset):
         '''
         self.is_correlation = is_correlation
         self.load_img = args.vis
+        self.load_mask = True
         self.mode = mode
         
         self.is_gaussian = args.gaussian
@@ -41,14 +45,11 @@ class PoseDataset(Dataset):
         self.intensity = Intensity(scale=0.05)
         self.gt_shape = args.hm_size
 
-        self.flatten = True #args.flatten
+        self.flatten = args.flatten
         self.arch = args.arch
-        if self.arch =='hrnet':
-            self.input_size= 128
-        else:
-            self.input_size = 128
 
-        
+        self.one = False
+        self.print_once = True
 
         data_path = '/data/nlos/save_data_ver2'
         if self.gt_shape == 32:
@@ -67,10 +68,13 @@ class PoseDataset(Dataset):
         #print(data_path_list)
         rf_data = []  # rf data list
         gt_list = []  # ground truth
+        mask_list = []
         img_list = []
         print("start - data read")
         #test_dir = [8, 9] # past version - 1
         test_dir = [2, 5, 10, 14, 16, 19] # cur version - 2
+        #test_dir = [7]
+        #test_dir = [2, 5, 10] # cur version - 2
         #test_dir = [2]
         #test_dir = [2, 5, 10] # los
         #test_dir = [14, 16, 19]  #nlos
@@ -89,9 +93,11 @@ class PoseDataset(Dataset):
             outlier_list = range(49500, 50000)
         else:
             outlier_list = range(18000, 19000)
+            #outlier_list = []
         rf_index = -1
         gt_index = -1
         img_index = -1
+        mask_index = -1
         
         frame_stack = deque(maxlen=args.frame_stack_num)        
         for file, file2 in zip(data_path_list,data_path_list2):
@@ -114,7 +120,7 @@ class PoseDataset(Dataset):
                 # 각 폴더 안의 npy 데이터
                 rf_file_list = glob.glob(file + '/raw/*.npy')
                 rf_file_list = sorted(rf_file_list)
-                print('dir(raw):', file, '\t# of data :', len(rf_file_list))
+                print('dir_count:', dir_count,'dir(raw):', file, '\t# of data :', len(rf_file_list))
                 #print(rf_file_list)
                 frame_stack.clear()
                 for rf in rf_file_list:
@@ -124,7 +130,10 @@ class PoseDataset(Dataset):
                         frame_stack.clear()
                         continue
                     temp_raw_rf = np.load(rf)
-                    temp_raw_rf = temp_raw_rf[:, :, self.cutoff:]
+                    if self.one:
+                        temp_raw_rf = temp_raw_rf[0,0,self.cutoff:]
+                    else:
+                        temp_raw_rf = temp_raw_rf[:, :, self.cutoff:]
 
                     #----- normalization ------
                     if self.is_normalize is True:
@@ -138,23 +147,32 @@ class PoseDataset(Dataset):
 
                     #---------- 2차원으로 만들기 -----------
                     if self.flatten:
-                        #temp_raw_rf = temp_raw_rf.view(-1, 1764)
-                        #temp_raw_rf = torch.cat([temp_raw_rf[:,:126],temp_raw_rf[:,126:126*2],temp_raw_rf[:,126*2:126*3],temp_raw_rf[:,126*3:126*4],temp_raw_rf[:,126*4:126*5],temp_raw_rf[:,126*5:126*6],temp_raw_rf[:,126*6:126*7],temp_raw_rf[:,126*7:126*8],temp_raw_rf[:,126*8:126*9],temp_raw_rf[:,126*9:126*10],temp_raw_rf[:,126*10:126*11],temp_raw_rf[:,126*11:126*12],temp_raw_rf[:,126*12:126*13],temp_raw_rf[:,126*13:126*14]])
-                        temp_raw_rf = rearrange(temp_raw_rf, 'tx rx len -> (tx rx) len')
-                        temp_raw_rf = rearrange(temp_raw_rf, 'x (len1 len2) -> (len1 x) len2', len1=14)
-                        #temp_raw_rf = temp_raw_rf.unsqueeze(0)
+                        if self.one:
+                            #print(temp_raw_rf.shape)
+                            temp_raw_rf = rearrange(temp_raw_rf, '(len1 len2) -> len1 len2', len1=int(math.sqrt(temp_raw_rf.shape[0])))
+                            #print(temp_raw_rf.shape)
+                            #pass 
+                        else:
+                            #temp_raw_rf = temp_raw_rf.view(-1, 1764)
+                            temp_raw_rf = rearrange(temp_raw_rf, 'tx rx len -> (tx rx) len')
+                            #temp_raw_rf = rearrange(temp_raw_rf, 'x (len1 len2) -> x len1 len2', len1=int(math.sqrt(temp_raw_rf.shape[1])))
+                            temp_raw_rf = rearrange(temp_raw_rf, 'x (len1 len2) -> (len1 x) len2', len1=14)
+                            temp_raw_rf = temp_raw_rf.unsqueeze(0)
                         #print(temp_raw_rf.shape)
                     
                     frame_stack.append(temp_raw_rf)
                     if len(frame_stack) == args.frame_stack_num:
                         stacked_raw_rf = torch.stack(tuple(frame_stack), 0)
+                        #stacked_raw_rf = rearrange(stacked_raw_rf, 'x (len1 len2) -> (len1 x) len2', len1=14)
+                        stacked_raw_rf = stacked_raw_rf.squeeze(0)
                         rf_data.append(stacked_raw_rf)
-                        #print(stacked_raw_rf.shape)
                     else:
                         not_stacked_list.append(rf_index)
                         #print(not_stacked_list)
                     
-                    #print("now shape",temp_raw_rf.shape)
+                    if self.print_once:
+                        print("now shape",stacked_raw_rf.shape)
+                        self.print_once = False
                     #rf_data.append(temp_raw_rf) 
                     
                 
@@ -165,23 +183,81 @@ class PoseDataset(Dataset):
                 '''
                 gt_file_list = glob.glob(file2 + '/gt/*')
                 gt_file_list = sorted(gt_file_list)
-                print('dir(gt):', file2, '\t# of data :', len(gt_file_list))
-                #np_load_old = np.load
-                #np.load = lambda *a,**k: np_load_old(*a, allow_pickle=True, **k)
-                #----- gt 메모리에 올려놓기 -----
-                """for gt in gt_file_list:
-                    temp_gt = np.load(gt)
-                    temp_gt = torch.tensor(temp_gt).float()
-                    temp_gt = temp_gt.reshape(13, 120, 120)
-                    #print(temp_gt.shape, temp_gt.dtype)
-                    gt_list.append(temp_gt)
-                """
-                #----- gt 파일 이름명만 리스트에 넣어놓기 -----
+                print('dir(gt):', file2, '\t# of data :', len(gt_file_list)) 
                 for gt in gt_file_list:
                     gt_index += 1
-                    if gt_index in outlier_list: #or gt_index in not_stacked_list:
+                    if gt_index in outlier_list or gt_index in not_stacked_list:
                         continue
                     gt_list.append(gt)
+
+                #img_file_list = glob.glob(file2 + '/img/*.jpg')
+                #img_file_list = sorted(img_file_list)
+
+                mask_file_list = glob.glob(file2 + '/mask/*')
+                mask_file_list = sorted(mask_file_list)
+                target_file_list = glob.glob(file2 + '/target/*')
+                target_file_list = sorted(target_file_list)
+                print('dir(mask):', file2, '\t# of data :', len(mask_file_list))
+                print('dir(target):', file2, '\t# of data :', len(target_file_list)) 
+                for i in range(len(mask_file_list)):
+                    
+                    mask = mask_file_list[i]
+                    target = target_file_list[i]
+                    #img = img_file_list[i]
+                    assert mask[-9:] == target[-9:]
+                    #print(mask[-9:], target[-9:])
+                    #print("mask shape = ", mask, np.load(mask).shape)
+                    #print("target shape = ", np.load(target), np.load(target).shape)
+                    
+                    mask = np.load(mask)
+                    target = np.load(target)
+                    mask_with_obj = np.zeros((3, 120, 120))
+                    #if target.shape[0] > mask.shape[0]:
+                        #print(target)
+                        #continue
+                    for i in range(mask.shape[0]):
+                        find_human = False
+                        find_chair = False
+                        #print(target[i][4])
+                        
+                        if target[i][4] ==0:
+                            if find_human == False:
+                                mask_with_obj[0] = cv2.resize(mask[i], (120, 120))
+                                find_human = True
+                            #else:
+                            #    mask_with_obj[2] = cv2.resize(mask[i], (120, 120))
+                        elif target[i][4] == 56:
+                            if find_chair == False:
+                                mask_with_obj[1] = cv2.resize(mask[i], (120, 120))
+                                find_chair = True
+                        else:
+                            mask_with_obj[2] = cv2.resize(mask[i], (120, 120))
+                    #for i in range(mask_with_obj.shape[0]):
+                    #    print_masks(cv2.imread(img), mask_with_obj[i], i)
+
+                    #print("mask shape = ", mask.shape)
+                    mask_index += 1
+                    if mask_index in outlier_list or mask_index in not_stacked_list:
+                        continue
+                    mask_list.append(mask_with_obj)
+                    
+                    if mask_index ==0:
+                        print("mask_shape = ", mask_with_obj.shape)
+
+                    #break
+                
+                '''
+                mask_file_list = glob.glob(file2 + '/human_mask/*')
+                mask_file_list = sorted(mask_file_list)
+                print('dir(mask):', file2, '\t# of data :', len(mask_file_list)) 
+                for mask in mask_file_list:
+                    if mask_index == 1:
+                        print("mask shape = ", mask, np.load(mask).shape)
+                    mask_index += 1
+                    if mask_index in outlier_list or mask_index in not_stacked_list:
+                        continue
+                    mask_list.append(mask)
+                '''
                 #np.load = np_load_old
                 if self.load_img is True:
                     img_file_list = glob.glob(file + '/img/*.jpg')
@@ -199,10 +275,14 @@ class PoseDataset(Dataset):
             dir_count += 1
         self.rf_data = rf_data
         self.gt_list = gt_list
+        self.mask_list = mask_list
         print(len(gt_list))
         if self.mode == 'valid' and len(self.gt_list) == 0:
             for i in range(len(self.rf_data)):
                 self.gt_list.append(np.zeros((13, self.gt_shape, self.gt_shape)))
+        if self.mode == 'valid' and len(self.mask_list) == 0:
+            for i in range(len(self.rf_data)):
+                self.mask_list.append(np.zeros((1, self.gt_shape, self.gt_shape)))
         self.img_list = img_list
         print("end - data read")
         print("size of dataset", len(self.rf_data))
@@ -213,12 +293,19 @@ class PoseDataset(Dataset):
     def __getitem__(self, idx):
         if self.mode == 'valid':
             gt = np.zeros((13, self.gt_shape, self.gt_shape))
+            mask = np.zeros((3, self.gt_shape, self.gt_shape))
         else:
             gt = np.load(self.gt_list[idx])
+            #mask = np.load(self.mask_list[idx])
+            mask = self.mask_list[idx]           
             #print("loaded gt", gt.shape)
+
         gt = torch.tensor(gt).float()
         gt = gt.reshape(13, self.gt_shape, self.gt_shape)
         
+        mask = torch.tensor(mask).float()
+        #mask = mask.reshape(1, self.gt_shape, self.gt_shape)
+
         rf = self.rf_data[idx] 
 
         #---- augmentation  ----#
@@ -254,13 +341,16 @@ class PoseDataset(Dataset):
 
         if self.load_img is False:
             #gaussian noise
-            if self.mode == 'train' and self.is_gaussian is True:
-                gt = gt + torch.randn(gt.size()) * self.std + self.mean
-                    
-            return rf, gt
+            if self.load_mask is False:
+                if self.mode == 'train' and self.is_gaussian is True:
+                    gt = gt + torch.randn(gt.size()) * self.std + self.mean
+                        
+                return rf, gt
+            else:
+                return rf, (gt, mask)
             # return self.rf_data[idx], self.gt_list[idx]
         else:
-            return rf, gt, self.img_list[idx]
+            return rf, gt, self.img_list[idx], mask
 
 def cutmix(rf, target_rf, gt, target_gt):
     beta = 1.0

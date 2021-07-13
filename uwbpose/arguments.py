@@ -31,7 +31,7 @@ def get_arguments():
     parser.add_argument('--normalize', action='store_true', default=False,
             help='data normalization by dividing the data with std-dev')
     
-    parser.add_argument('--cutoff', type=int, default=284, # 128, 246
+    parser.add_argument('--cutoff', type=int, default=284, #448, # 284, 246
             help='cut off the front of the input data,   --> length = 2048 - cutoff')
 
     parser.add_argument('--hm-size', type=int, default=120, # 128, 246   
@@ -43,27 +43,31 @@ def get_arguments():
     parser.add_argument('--model-name', type=str, default='',
             help='load model name')
 
-    parser.add_argument('--frame-stack-num', type=int, default=1, # 128, 246
+    parser.add_argument('--frame-stack-num', type=int, default=1, 
             help='number of stacked frame')
+    
+    parser.add_argument('--mask', action='store_true', default=False,
+            help='train and test mask')
 
     
     parser.add_argument('--augment', default='None', type=str,
             choices=['cutmix',
                 'mixup',
                 'intensity',
-                'all'],
+                'all',
+                'None'],
             help='rf data augmentation')
 
     parser.add_argument('--flatten', action='store_true', default=True,
-                        help='flatten raw data to 2d [128, 135]')
-    parser.add_argument('--arch', default='vit', type=str,
+                        help='flatten raw data to 2d [126, 126]')
+    parser.add_argument('--arch', default='t2t', type=str,
             choices=['hrnet',
                 'resnet',
-                'transh',
-                'transr',
+                'resnet_one',
                 'vit',
                 't2t',
-                'multitrans',],
+                't2t_one',
+                'mask_resnet'],
             help='backbone architecture')
 
     return parser.parse_args()

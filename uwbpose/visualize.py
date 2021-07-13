@@ -10,10 +10,54 @@ import os
 import numpy as np
 import torchvision
 import cv2
+import torch
 
 from inference import get_max_preds
 from transforms import get_affine_transform
 
+COLORS = (244,  67,  54)
+
+def print_masks(img, masks, idx):
+    threshold = 0.7
+    mask_alpha=0.45
+    color = (244,  67,  54)
+    color = (color[2], color[1], color[0])
+    #print(img.shape)
+    #img = img.cpu().numpy()
+    img = cv2.resize(img, dsize=(480, 480), interpolation=cv2.INTER_AREA)
+    #mask = masks[0][0]#.cpu().numpy()
+    mask = masks
+    
+    #print(mask[45:75,45:75])   
+    #mask = [0 if v_ > threshold else v_ for v_ in mask]
+    mask[mask < threshold] = 0
+    #print(mask[45:75,45:75])    
+
+    mask = mask[:, :, None] # 120, 120, 1
+    mask = mask.repeat(3, axis=2) * color
+    mask_numpy = cv2.resize(mask, (480, 480))
+    #print(mask_numpy.shape, img.shape)
+    
+    '''
+    masks = masks[:, :, :, None]
+
+    color = torch.Tensor(color).cpu() / 255.
+    color = color.view(1,1,1,3)
+    #print(masks.shape, color.shape, img.shape)
+    masks_color =  masks.repeat(1, 1, 1, 3) * color * mask_alpha
+    mask_gpu = masks_color[0]
+    mask_numpy = (mask_gpu * 255).byte().cpu().numpy()
+    #print(mask_numpy.shape)
+    mask_numpy = cv2.resize(mask_numpy, dsize=(480, 480), interpolation=cv2.INTER_AREA)
+    '''
+    save_dir = './vis/mask_0713/'
+    os.makedirs(save_dir, exist_ok=True)
+
+    #res = np.concatenate((img, mask_numpy), axis=1)
+    res = img + mask_numpy * mask_alpha
+    res= np.concatenate((res, mask_numpy), axis=1)
+    #print(res.shape)
+    cv2.imwrite(os.path.join(save_dir, str(idx)) +'_masks_fusion{}.png'.format(threshold), res)
 
 def save_batch_image_with_joints(batch_image, batch_joints,
                                  file_name, nrow=8, padding=2):
@@ -199,10 +243,11 @@ class Visualize:
             cv2.imwrite(self.save_dir + prefix + '_%05d.jpg'%(start_idx+i), dst)
 
 
-    def compare_visualize(self, img, pred, target, idx):
+    def compare_visualize(self, img, pred, target, idx, mask=None):
    
         start_idx = idx*32
-        #print("img shape", img.shape, "pred shape", pred.shape)
+        if mask is not None:
+            print("img shape", img.shape, "pred shape", pred.shape, "mask shape", mask.shape)
         num_img = img.shape[0]
         num_joint = pred.shape[1]
         center = np.array([320, 240], dtype=np.float32)
@@ -212,6 +257,8 @@ class Visualize:
             #dst = cv2.resize(img[i], dsize=(480, 480), interpolation=cv2.INTER_AREA)
             #trans = get_affine_transform(center, scale, rotation, (480, 480))
             #dst = cv2.warpAffine(img[i], trans, (int(480), int(480)), flags=cv2.INTER_LINEAR)
+            #if i % 5 != 0 :
+            #    continue
             original = img[i].copy()
             
             if self.show_debug_idx is True:
@@ -269,5 +316,5 @@ class Visualize:
             res = dst
             #res = np.concatenate((gt_img, dst), axis=1)
             res = np.concatenate((original, res), axis=1)
-            cv2.imwrite(self.save_dir + 'compare_%05d.jpg'%(start_idx+i), res)
+            #cv2.imwrite(self.save_dir + 'compare_%05d.jpg'%(start_idx+i), res)
 

@@ -1,10 +1,9 @@
+import math
 import torch
 from torch import nn, einsum
-import torch.nn.functional as F
 
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
-import math
 
 BN_MOMENTUM = 0.1
 
@@ -89,37 +88,75 @@ class Transformer(nn.Module):
             x = ff(x)
         return x
 
-class ViT(nn.Module):
-    def __init__(self, *, image_size, patch_size, dim, depth, heads, mlp_dim, pool = 'cls', channels = 1, dim_head = 64, dropout = 0., emb_dropout = 0.):
+# helpers
+def exists(val):
+    return val is not None
+
+def conv_output_size(image_size, kernel_size, stride, padding):
+    return int(((image_size - kernel_size + (2 * padding)) / stride) + 1)
+
+
+# classes
+class RearrangeImage(nn.Module):
+    def forward(self, x):
+        return rearrange(x, 'b (h w) c -> b c h w', h = int(math.sqrt(x.shape[1])))
+
+# main class
+
+class T2TViT_One(nn.Module):
+    def __init__(self, *, image_size, dim, depth = None, heads = None, mlp_dim = None, pool = 'cls', channels = 1, dim_head = 64, dropout = 0., emb_dropout = 0., transformer = None, t2t_layers = ((7, 4), (3, 2), (3, 2))):
         super().__init__()
-        assert image_size % patch_size == 0, 'Image dimensions must be divisible by the patch size.'
-        num_patches = (image_size // patch_size) ** 2
-        patch_dim = channels * patch_size ** 2
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
-        print("num_patches = {}, patch_dim = {}".format(num_patches, patch_dim))
-        
+        print("-------------- T2TVit RF Transformer Model(1x1) new--------------")
+        layers = []
+        layer_dim = channels
+        output_image_size = image_size
         self.deconv_with_bias = False
+
+        self.t2t_module = []
+        #t2t_layers = ((7, 4), (3, 2), (1, 1))
+        print(t2t_layers)
+        for i, (kernel_size, stride) in enumerate(t2t_layers):
+            if i == 0:
+                layer_dim *= kernel_size ** 2
+                output_image_size = conv_output_size(output_image_size, kernel_size, stride, stride // 2)
+                #output_image_size = 19
+                layers.extend([
+                    nn.Identity(),
+                    nn.Unfold(kernel_size = kernel_size, stride = stride, padding = stride // 2),
+                    Rearrange('b c n -> b n c'),
+                    Transformer(dim = layer_dim, heads = 1, depth = 1, dim_head = layer_dim, mlp_dim = layer_dim, dropout = dropout),
+                ])
+                #self.t2t_module.append(nn.Sequential(*layers))
+                #layers = []
+            else:
+                layer_dim *= kernel_size ** 2
+                output_image_size = conv_output_size(output_image_size, kernel_size, stride, stride // 2)
+                layers.extend([
+                    RearrangeImage(),
+                    nn.Unfold(kernel_size = kernel_size, stride = stride, padding = stride // 2),
+                    Rearrange('b c n -> b n c'),
+                    Transformer(dim = layer_dim, heads = 1, depth = 1, dim_head = layer_dim, mlp_dim = layer_dim, dropout = dropout),
+                ])
+                #self.t2t_module.append(nn.Sequential(*layers))
+                #layers = [] 
         
-        self.to_patch_embedding = nn.Sequential(
-            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_size, p2 = patch_size),
-            nn.Linear(patch_dim, dim),
-        )
+        #layers.append(nn.Linear(layer_dim, dim))
+        self.to_patch_embedding = nn.Sequential(*layers)
+        #self.linear_projection = nn.Linear(layer_dim, dim)
+        dim = layer_dim
+        self.pos_embedding = nn.Parameter(torch.randn(1, output_image_size ** 2, dim))
+        #self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
+        #self.dropout = nn.Dropout(emb_dropout)
 
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
-        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
-        self.dropout = nn.Dropout(emb_dropout)
+        if not exists(transformer):
+            assert all([exists(depth), exists(heads), exists(mlp_dim)]), 'depth, heads, and mlp_dim must be supplied'
+            self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        else:
+            self.transformer = transformer
 
-        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.inplanes = output_image_size ** 2 + 1 #65
 
-        self.pool = pool
-        #self.to_latent = nn.Identity()
-        '''
-        self.to_latent = nn.Conv1d(
-            in_channels = 50,
-            out_channels = 32, 
-            kernel_size=1)
-        '''
-        self.inplanes = 32
         self.deconv_layers = self._make_deconv_layer(
             4,  # NUM_DECONV_LAYERS
             [256,256,256,256],  # NUM_DECONV_FILTERS
@@ -134,21 +171,23 @@ class ViT(nn.Module):
             padding=0
         )
 
-        dummy = torch.zeros(64, channels, 40, 40)
+        dummy = torch.zeros(64, 1,  40, 40)
         #dummy = torch.zeros(32, channels, 9, 1809)  
         self.check_dim(dummy)
 
-    def forward(self, x, mask = None):
-        x = self.to_patch_embedding(x) # batch, 16, 2048
-        b, n, _ = x.shape
-        x += self.pos_embedding[:, :n] # batch, 17, 2048
-        x = self.dropout(x)
-        x = self.transformer(x, mask) # batch, 2048
+
+    def forward(self, x):
+        x = self.to_patch_embedding(x)
+        #x = self.linear_projection(x)
+        x += self.pos_embedding
+        x = self.transformer(x)
+        #x = rearrange(x, 'b n c -> b c n')
         x = rearrange(x, 'b (h w) c -> b c h w', h = int(math.sqrt(x.shape[1]))).contiguous()
         x = self.deconv_layers(x) # batch, 256, 64, 64
         x = self.final_layer(x)
         return x
 
+   
     def _get_deconv_cfg(self, deconv_kernel, index):
         if deconv_kernel == 4:
             padding = 1
@@ -172,7 +211,7 @@ class ViT(nn.Module):
             'ERROR: num_deconv_layers is different len(num_deconv_filters)'
         layers = []
         s = 2
-        self.inplanes = 1024
+        self.inplanes = 441#900#441
         for i in range(num_layers):
             kernel, padding, output_padding = \
                 self._get_deconv_cfg(num_kernels[i], i)
@@ -196,25 +235,35 @@ class ViT(nn.Module):
 
         return nn.Sequential(*layers)
     
-    def check_dim(self, x, mask = None):
-        print("vit _input = ", x.shape)
-        x = self.to_patch_embedding(x) # batch, 16, 2048
-        print(x.shape)
-        b, n, _ = x.shape
-        #cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b)
-        #x = torch.cat((cls_tokens, x), dim=1)
-        #print(x.shape)
-        x += self.pos_embedding[:, :n] # batch, 17, 2048
-        print("before transformer", x.shape)
-        x = self.dropout(x)
-        x = self.transformer(x, mask) # batch, 2048
-        print(x.shape)
-        print("after transformer", x.shape)
-        #x = x.reshape(-1, 32, 8, 8) # batch, 32, 8, 8
+    def check_dim(self, x):
+
+        print("input : ", x.shape)
+        print (x.is_contiguous())
+        x = self.to_patch_embedding(x)
+        print("to_patch_embedding : ", x.shape)
+        print (x.is_contiguous())
+        #x = self.linear_projection(x)
+        #print("linear : ", x.shape)
+        x += self.pos_embedding
+        print("pose_embedding : ", x.shape)
+        print (x.is_contiguous())
+        #x = self.dropout(x)
+        x = self.transformer(x)
+        print("transformer : ", x.shape)
+        print (x.is_contiguous())
+        #x = rearrange(x, 'b n c -> b c n')
+        #print("reshape ", x.shape)
+        #print (x.is_contiguous())
+        #x = rearrange(x, 'b c (h w) -> b c h w', h = int(math.sqrt(x.shape[2])))
+        
         x = rearrange(x, 'b (h w) c -> b c h w', h = int(math.sqrt(x.shape[1]))).contiguous()
-        print(x.shape)
+        print("reshape ", x.shape)
+        print (x.is_contiguous())
         x = self.deconv_layers(x) # batch, 256, 64, 64
-        print(x.shape)
+        print("deconv : ", x.shape)
+        print (x.is_contiguous())
         x = self.final_layer(x)
-        print(x.shape)
+        print("reshape ", x.shape)
+        print (x.is_contiguous())
+    
         return x
